@@ -55,6 +55,35 @@ req.get().set_msg("hello");
 let reply = req.send().promise.await?;
 ```
 
+## Errors
+
+Local errors are `error_stack::Report<C>` over layered contexts
+(`EndpointError` → `TransportError` → `HandshakeError` → `RpcError`); match the
+top with `current_context()`, reach a layer with `downcast_ref()`.
+
+Only what you opt in crosses the wire — attachments (paths, PIDs, addresses)
+stay local, since the peer may be an untrusted plugin. Attach a `WireCode` to
+make a failure matchable on the other side:
+
+```rust
+use ogurpchik::error::{RpcError, WireCode, WireMessage};
+
+Report::new(RpcError::Handler)
+    .attach(WireCode::PermissionDenied)
+    .attach(WireMessage("plugin may not read host config".into()))
+```
+
+The peer receives `RpcError::Remote { code: Some(WireCode::PermissionDenied), .. }`.
+Handlers returning `capnp::Error` directly can use
+`WireCode::InvalidArgument.exception("port must be non-zero")`.
+
+On the wire this is the exception text `[ogurpchik:<code>] <message>` — a
+non-Rust plugin can produce and parse it. Unknown codes decode to
+`WireCode::Unknown` rather than failing, so a newer peer stays compatible.
+
+A received code is a claim by the peer, not a verified fact: use it for
+diagnostics and retry decisions, never for authorization.
+
 ## License
 
 MIT
