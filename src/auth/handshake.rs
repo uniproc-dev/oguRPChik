@@ -15,7 +15,7 @@ use std::io::Cursor;
 use std::rc::Rc;
 use std::time::Duration;
 
-const HANDSHAKE_VERSION: u16 = 1;
+const HANDSHAKE_VERSION: u16 = 2;
 const NONCE_LEN: usize = 32;
 const HMAC_LABEL: &[u8] = b"ogurpchik/handshake/v1";
 
@@ -64,6 +64,21 @@ impl HandshakeMode {
             Self::HmacSha256 { .. } => 1,
             Self::SignedProcess { .. } => 2,
         }
+    }
+}
+
+/// Identity of the application schema both sides were built against.
+///
+/// Opaque to this crate: the application supplies it (typically a hash of its
+/// `.capnp` files) and the handshake refuses to proceed when the two sides
+/// differ. Not checked in [`HandshakeMode::Disabled`], which skips the
+/// handshake entirely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SchemaId(pub u64);
+
+impl fmt::Display for SchemaId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
     }
 }
 
@@ -131,7 +146,11 @@ impl Drop for ConnectionLease {
     }
 }
 
-pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Result<(), HandshakeError> {
+pub async fn authenticate_server(
+    conn: &mut Conn,
+    mode: &HandshakeMode,
+    schema: SchemaId,
+) -> Result<(), HandshakeError> {
     if matches!(mode, HandshakeMode::Disabled) {
         return Ok(());
     }
@@ -152,17 +171,20 @@ pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Resul
         Report::new(HandshakeError::Io).attach(format!("failed to generate nonce: {e}"))
     })?;
 
-    write_packet(conn, &encode_hello(mode.scheme_id(), &nonce)).await?;
+    write_packet(conn, &encode_hello(mode.scheme_id(), schema, &nonce)).await?;
     let auth_body = read_packet_with_timeout(conn).await?;
-    let (client_version, scheme, proof) = decode_client_auth(&auth_body)?;
 
-    if client_version != HANDSHAKE_VERSION {
+    if let Some(client_version) = packet_version(&auth_body)
+        && client_version != HANDSHAKE_VERSION
+    {
         let reason = format!(
             "unsupported handshake version: client={client_version} server={HANDSHAKE_VERSION}"
         );
         let _ = write_packet(conn, &encode_ack(ACK_REJECTED, reason.as_bytes())).await;
         return Err(Report::new(HandshakeError::UnsupportedVersion).attach(reason));
     }
+
+    let (scheme, client_schema, proof) = decode_client_auth(&auth_body)?;
 
     if scheme != mode.scheme_id() {
         let reason = format!(
@@ -171,6 +193,12 @@ pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Resul
         );
         let _ = write_packet(conn, &encode_ack(ACK_REJECTED, reason.as_bytes())).await;
         return Err(Report::new(HandshakeError::SchemeMismatch).attach(reason));
+    }
+
+    if client_schema != schema {
+        let reason = format!("application schema mismatch: client={client_schema} server={schema}");
+        let _ = write_packet(conn, &encode_ack(ACK_REJECTED, reason.as_bytes())).await;
+        return Err(Report::new(HandshakeError::SchemaMismatch).attach(reason));
     }
 
     match mode {
@@ -203,7 +231,11 @@ pub async fn authenticate_server(conn: &mut Conn, mode: &HandshakeMode) -> Resul
     write_packet(conn, &encode_ack(ACK_OK, &[])).await
 }
 
-pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Result<(), HandshakeError> {
+pub async fn authenticate_client(
+    conn: &mut Conn,
+    mode: &HandshakeMode,
+    schema: SchemaId,
+) -> Result<(), HandshakeError> {
     if matches!(mode, HandshakeMode::Disabled) {
         return Ok(());
     }
@@ -212,12 +244,15 @@ pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Resul
     if hello_body.first() == Some(&TAG_ACK) {
         return decode_ack(&hello_body);
     }
-    let (server_version, scheme, nonce) = decode_hello(&hello_body)?;
 
-    if server_version != HANDSHAKE_VERSION {
+    if let Some(server_version) = packet_version(&hello_body)
+        && server_version != HANDSHAKE_VERSION
+    {
         return Err(Report::new(HandshakeError::UnsupportedVersion)
             .attach(format!("server={server_version} client={HANDSHAKE_VERSION}")));
     }
+
+    let (scheme, server_schema, nonce) = decode_hello(&hello_body)?;
 
     if scheme != mode.scheme_id() {
         return Err(Report::new(HandshakeError::SchemeMismatch)
@@ -231,7 +266,12 @@ pub async fn authenticate_client(conn: &mut Conn, mode: &HandshakeMode) -> Resul
             .to_vec(),
         _ => Vec::new(),
     };
-    write_packet(conn, &encode_client_auth(scheme, &proof)).await?;
+    write_packet(conn, &encode_client_auth(scheme, schema, &proof)).await?;
+
+    if server_schema != schema {
+        return Err(Report::new(HandshakeError::SchemaMismatch)
+            .attach(format!("server={server_schema} client={schema}")));
+    }
 
     let ack_body = read_packet_with_timeout(conn).await?;
     decode_ack(&ack_body)
@@ -297,6 +337,7 @@ struct HelloPacket {
     tag: u8,
     version: u16,
     scheme: u8,
+    schema: u64,
     nonce_len: u16,
     #[br(count = nonce_len)]
     nonce: Vec<u8>,
@@ -308,6 +349,7 @@ struct ClientAuthPacket {
     tag: u8,
     version: u16,
     scheme: u8,
+    schema: u64,
     proof_len: u16,
     #[br(count = proof_len)]
     proof: Vec<u8>,
@@ -323,40 +365,49 @@ struct AckPacket {
     reason: Vec<u8>,
 }
 
-fn encode_hello(scheme: u8, nonce: &[u8]) -> Vec<u8> {
+fn packet_version(body: &[u8]) -> Option<u16> {
+    match body {
+        [_tag, lo, hi, ..] => Some(u16::from_le_bytes([*lo, *hi])),
+        _ => None,
+    }
+}
+
+fn encode_hello(scheme: u8, schema: SchemaId, nonce: &[u8]) -> Vec<u8> {
     write_body(&HelloPacket {
         tag: TAG_HELLO,
         version: HANDSHAKE_VERSION,
         scheme,
+        schema: schema.0,
         nonce_len: nonce.len() as u16,
         nonce: nonce.to_vec(),
     })
 }
 
-fn decode_hello(body: &[u8]) -> Result<(u16, u8, Vec<u8>), HandshakeError> {
+fn decode_hello(body: &[u8]) -> Result<(u8, SchemaId, Vec<u8>), HandshakeError> {
     let packet: HelloPacket = read_body(body, "hello")?;
     if packet.tag != TAG_HELLO {
         return Err(malformed("hello"));
     }
-    Ok((packet.version, packet.scheme, packet.nonce))
+    Ok((packet.scheme, SchemaId(packet.schema), packet.nonce))
 }
 
-fn encode_client_auth(scheme: u8, proof: &[u8]) -> Vec<u8> {
+fn encode_client_auth(scheme: u8, schema: SchemaId, proof: &[u8]) -> Vec<u8> {
     write_body(&ClientAuthPacket {
         tag: TAG_CLIENT_AUTH,
         version: HANDSHAKE_VERSION,
         scheme,
+        schema: schema.0,
         proof_len: proof.len() as u16,
         proof: proof.to_vec(),
     })
 }
 
-fn decode_client_auth(body: &[u8]) -> Result<(u16, u8, Vec<u8>), HandshakeError> {
+fn decode_client_auth(body: &[u8]) -> Result<(u8, SchemaId, Vec<u8>), HandshakeError> {
     let packet: ClientAuthPacket = read_body(body, "client auth")?;
     if packet.tag != TAG_CLIENT_AUTH {
         return Err(malformed("client auth"));
     }
-    Ok((packet.version, packet.scheme, packet.proof))
+    Ok((packet.scheme, SchemaId(packet.schema), packet.proof))
 }
 
 fn encode_ack(status: u8, reason: &[u8]) -> Vec<u8> {
@@ -414,6 +465,8 @@ mod tests {
     use super::*;
     use crate::net::Listener;
 
+    const SCHEMA: SchemaId = SchemaId(0x5eed);
+
     async fn tcp_pair() -> (Conn, Conn) {
         let listener = Listener::bind_tcp("127.0.0.1:0".parse().unwrap())
             .await
@@ -441,10 +494,12 @@ mod tests {
     async fn hmac_handshake_ok() {
         let (mut server, mut client) = tcp_pair().await;
         let server_fut = compio::runtime::spawn(async move {
-            authenticate_server(&mut server, &HandshakeMode::hmac(b"shared-secret".to_vec())).await
+            authenticate_server(&mut server, &HandshakeMode::hmac(b"shared-secret".to_vec()), SCHEMA)
+                .await
         });
         let client_result =
-            authenticate_client(&mut client, &HandshakeMode::hmac(b"shared-secret".to_vec())).await;
+            authenticate_client(&mut client, &HandshakeMode::hmac(b"shared-secret".to_vec()), SCHEMA)
+                .await;
         client_result.expect("client handshake failed");
         server_fut.await.unwrap().expect("server handshake failed");
     }
@@ -453,10 +508,10 @@ mod tests {
     async fn hmac_wrong_secret_is_rejected() {
         let (mut server, mut client) = tcp_pair().await;
         let server_fut = compio::runtime::spawn(async move {
-            authenticate_server(&mut server, &HandshakeMode::hmac(b"right".to_vec())).await
+            authenticate_server(&mut server, &HandshakeMode::hmac(b"right".to_vec()), SCHEMA).await
         });
         let client_result =
-            authenticate_client(&mut client, &HandshakeMode::hmac(b"wrong".to_vec())).await;
+            authenticate_client(&mut client, &HandshakeMode::hmac(b"wrong".to_vec()), SCHEMA).await;
         let client_err = client_result.expect_err("client must be rejected");
         assert!(matches!(
             client_err.current_context(),
@@ -473,10 +528,10 @@ mod tests {
     async fn scheme_mismatch_is_detected_by_client() {
         let (mut server, mut client) = tcp_pair().await;
         let server_fut = compio::runtime::spawn(async move {
-            authenticate_server(&mut server, &HandshakeMode::hmac(b"s".to_vec())).await
+            authenticate_server(&mut server, &HandshakeMode::hmac(b"s".to_vec()), SCHEMA).await
         });
         let client_result =
-            authenticate_client(&mut client, &HandshakeMode::version_only()).await;
+            authenticate_client(&mut client, &HandshakeMode::version_only(), SCHEMA).await;
         let client_err = client_result.expect_err("client must detect the scheme mismatch");
         assert!(matches!(
             client_err.current_context(),
@@ -488,12 +543,88 @@ mod tests {
     #[compio::test]
     async fn signed_process_refused_on_unattestable_transport() {
         let (mut server, _client) = tcp_pair().await;
-        let err = authenticate_server(&mut server, &HandshakeMode::signed_process(vec![0u8; 32]))
-            .await
-            .expect_err("signed-process on tcp must be refused");
+        let err = authenticate_server(
+            &mut server,
+            &HandshakeMode::signed_process(vec![0u8; 32]),
+            SCHEMA,
+        )
+        .await
+        .expect_err("signed-process on tcp must be refused");
         assert!(matches!(
             err.current_context(),
             HandshakeError::PeerAttestationUnavailable
+        ));
+    }
+
+    #[compio::test]
+    async fn schema_mismatch_is_reported_by_both_sides() {
+        let (mut server, mut client) = tcp_pair().await;
+        let server_fut = compio::runtime::spawn(async move {
+            authenticate_server(&mut server, &HandshakeMode::version_only(), SchemaId(1)).await
+        });
+        let client_err =
+            authenticate_client(&mut client, &HandshakeMode::version_only(), SchemaId(2))
+                .await
+                .expect_err("client must detect the schema mismatch");
+        assert!(matches!(
+            client_err.current_context(),
+            HandshakeError::SchemaMismatch
+        ));
+
+        let server_err = server_fut
+            .await
+            .unwrap()
+            .expect_err("server must reject the schema mismatch");
+        assert!(matches!(
+            server_err.current_context(),
+            HandshakeError::SchemaMismatch
+        ));
+    }
+
+    fn v1_packet(tag: u8, scheme: u8, tail: &[u8]) -> Vec<u8> {
+        let mut body = vec![tag];
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.push(scheme);
+        body.extend_from_slice(&(tail.len() as u16).to_le_bytes());
+        body.extend_from_slice(tail);
+        body
+    }
+
+    #[compio::test]
+    async fn older_server_is_reported_as_version_not_malformed() {
+        let (mut server, mut client) = tcp_pair().await;
+        write_packet(&mut server, &v1_packet(TAG_HELLO, 0, &[0u8; NONCE_LEN]))
+            .await
+            .expect("send v1 hello");
+
+        let err = authenticate_client(&mut client, &HandshakeMode::version_only(), SCHEMA)
+            .await
+            .expect_err("a v1 hello must be refused");
+        assert!(matches!(
+            err.current_context(),
+            HandshakeError::UnsupportedVersion
+        ));
+    }
+
+    #[compio::test]
+    async fn older_client_is_reported_as_version_not_malformed() {
+        let (mut server, mut client) = tcp_pair().await;
+        let server_fut = compio::runtime::spawn(async move {
+            authenticate_server(&mut server, &HandshakeMode::version_only(), SCHEMA).await
+        });
+
+        read_packet_with_timeout(&mut client).await.expect("read hello");
+        write_packet(&mut client, &v1_packet(TAG_CLIENT_AUTH, 0, &[]))
+            .await
+            .expect("send v1 client auth");
+
+        let err = server_fut
+            .await
+            .unwrap()
+            .expect_err("a v1 client must be refused");
+        assert!(matches!(
+            err.current_context(),
+            HandshakeError::UnsupportedVersion
         ));
     }
 
@@ -526,9 +657,9 @@ mod tests {
             let name = format!("ogurpchik-hs-signed-{}", std::process::id());
             let (mut server, mut client) = npipe_pair(&name).await;
             let server_fut = compio::runtime::spawn(async move {
-                authenticate_server(&mut server, &server_mode).await
+                authenticate_server(&mut server, &server_mode, SCHEMA).await
             });
-            authenticate_client(&mut client, &client_mode)
+            authenticate_client(&mut client, &client_mode, SCHEMA)
                 .await
                 .expect("client handshake failed");
             server_fut.await.unwrap().expect("server handshake failed");
@@ -538,16 +669,20 @@ mod tests {
             let name = format!("ogurpchik-hs-forged-{}", std::process::id());
             let (mut server, mut client) = npipe_pair(&name).await;
             let server_fut = compio::runtime::spawn(async move {
-                authenticate_server(&mut server, &HandshakeMode::signed_process(public_key.clone()))
-                    .await
+                authenticate_server(
+                    &mut server,
+                    &HandshakeMode::signed_process(public_key.clone()),
+                    SCHEMA,
+                )
+                .await
             });
 
             let hello_body = read_packet_with_timeout(&mut client)
                 .await
                 .expect("read hello");
-            let (_version, scheme, _nonce) = decode_hello(&hello_body).expect("decode hello");
+            let (scheme, _schema, _nonce) = decode_hello(&hello_body).expect("decode hello");
             let forged_proof = 0xDEADu32.to_le_bytes();
-            write_packet(&mut client, &encode_client_auth(scheme, &forged_proof))
+            write_packet(&mut client, &encode_client_auth(scheme, SCHEMA, &forged_proof))
                 .await
                 .expect("send forged auth");
             let ack_body = read_packet_with_timeout(&mut client)

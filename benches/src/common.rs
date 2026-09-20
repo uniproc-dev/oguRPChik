@@ -1,9 +1,11 @@
 
 use testschema::echo_capnp::echo;
-use ogurpchik::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
+use ogurpchik::auth::handshake::{HandshakeMode, SchemaId, authenticate_client, authenticate_server};
 use ogurpchik::net::{Conn, Listener};
 use ogurpchik::rpc::{RpcSession, Side, spawn_session};
 use capnp::capability::Rc;
+
+const SCHEMA: SchemaId = SchemaId(0xbe4c);
 
 pub struct EchoImpl;
 
@@ -76,7 +78,7 @@ impl ConnConnect {
 pub fn spawn_server(listener: Listener) {
     compio::runtime::spawn(async move {
         let mut conn = listener.accept().await.expect("accept failed");
-        authenticate_server(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()))
+        authenticate_server(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()), SCHEMA)
             .await
             .expect("server handshake failed");
         let session = spawn_session::<echo::Client, _>(conn, Side::Server, EchoImpl);
@@ -87,7 +89,7 @@ pub fn spawn_server(listener: Listener) {
 
 pub async fn client_session(connect: ConnConnect) -> RpcSession<echo::Client> {
     let mut conn = connect.connect().await;
-    authenticate_client(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()))
+    authenticate_client(&mut conn, &HandshakeMode::hmac(b"bench".to_vec()), SCHEMA)
         .await
         .expect("client handshake failed");
     spawn_session(conn, Side::Client, EchoImpl)

@@ -1,9 +1,11 @@
 use capnp::capability::Rc;
-use ogurpchik::auth::handshake::HandshakeMode;
+use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::net::vsock::VsockTarget;
 use ogurpchik::rpc::{accept_session, connect_session};
 use testschema::echo_capnp::echo;
+
+const SCHEMA: SchemaId = SchemaId(0xec40);
 
 struct EchoImpl;
 
@@ -40,7 +42,7 @@ async fn main() {
             };
             let listener = endpoint.listen().await.expect("listen failed");
             println!("listening on vsock port {port} ({})", endpoint.kind());
-            let session = accept_session::<echo::Client, _>(&listener, &handshake, EchoImpl)
+            let session = accept_session::<echo::Client, _>(&listener, &handshake, SCHEMA, EchoImpl)
                 .await
                 .expect("accept_session failed");
             println!("peer connected and authenticated, serving");
@@ -52,7 +54,7 @@ async fn main() {
             let endpoint = Endpoint::vsock_to_best_vm(port).expect("failed to resolve best vm");
             #[cfg(not(windows))]
             let endpoint = Endpoint::vsock_to_host(port);
-            let session = connect_session::<echo::Client, _>(&endpoint, &handshake, EchoImpl)
+            let session = connect_session::<echo::Client, _>(&endpoint, &handshake, SCHEMA, EchoImpl)
                 .await
                 .expect("connect_session failed");
             let mut req = session.remote().ping_request();

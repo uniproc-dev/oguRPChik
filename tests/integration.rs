@@ -1,8 +1,8 @@
 
 use testschema::echo_capnp::echo;
 use ogurpchik::auth::handshake::{
-    ConnectionGate, ConnectionMode, HandshakeMode, authenticate_client, authenticate_server,
-    reject_connection,
+    ConnectionGate, ConnectionMode, HandshakeMode, SchemaId, authenticate_client,
+    authenticate_server, reject_connection,
 };
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::error::{HandshakeError, RpcError};
@@ -26,19 +26,21 @@ impl echo::Server for EchoImpl {
     }
 }
 
+const SCHEMA: SchemaId = SchemaId(0x17);
+
 fn hmac() -> HandshakeMode {
     HandshakeMode::hmac(b"integration-secret".to_vec())
 }
 
 async fn serve_one(listener: &Listener) -> RpcSession<echo::Client> {
-    ogurpchik::rpc::accept_session(listener, &hmac(), EchoImpl)
+    ogurpchik::rpc::accept_session(listener, &hmac(), SCHEMA, EchoImpl)
         .await
         .expect("accept_session failed")
 }
 
 async fn connect_client(conn: Conn) -> RpcSession<echo::Client> {
     let mut conn = conn;
-    authenticate_client(&mut conn, &hmac())
+    authenticate_client(&mut conn, &hmac(), SCHEMA)
         .await
         .expect("client handshake failed");
     spawn_session(conn, Side::Client, EchoImpl)
@@ -99,7 +101,7 @@ async fn tcp_facade_roundtrip() {
     let endpoint = Endpoint::Tcp(inner.local_addr().unwrap());
 
     let server_task = compio::runtime::spawn(async move {
-        let session = accept_session::<echo::Client, _>(&listener, &hmac(), EchoImpl)
+        let session = accept_session::<echo::Client, _>(&listener, &hmac(), SCHEMA, EchoImpl)
             .await
             .expect("accept_session failed");
         compio::time::timeout(std::time::Duration::from_secs(5), session.wait())
@@ -107,12 +109,49 @@ async fn tcp_facade_roundtrip() {
             .ok();
     });
 
-    let session = connect_session::<echo::Client, _>(&endpoint, &hmac(), EchoImpl)
+    let session = connect_session::<echo::Client, _>(&endpoint, &hmac(), SCHEMA, EchoImpl)
         .await
         .expect("connect_session failed");
     assert_eq!(ping(&session, "facade").await, "echo facade");
     drop(session);
     server_task.await.unwrap();
+}
+
+#[compio::test]
+async fn facade_surfaces_schema_mismatch() {
+    use ogurpchik::rpc::{accept_session, connect_session};
+
+    let endpoint = Endpoint::Tcp("127.0.0.1:0".parse().unwrap());
+    let listener = endpoint.listen().await.expect("listen failed");
+    let Listener::Tcp(inner) = &listener else {
+        unreachable!()
+    };
+    let endpoint = Endpoint::Tcp(inner.local_addr().unwrap());
+
+    let server_task = compio::runtime::spawn(async move {
+        accept_session::<echo::Client, _>(&listener, &hmac(), SchemaId(1), EchoImpl)
+            .await
+            .map(drop)
+    });
+
+    let err = connect_session::<echo::Client, _>(&endpoint, &hmac(), SchemaId(2), EchoImpl)
+        .await
+        .map(drop)
+        .expect_err("a client built against another schema must not connect");
+    assert!(matches!(err.current_context(), RpcError::Setup));
+    assert!(matches!(
+        err.downcast_ref::<HandshakeError>(),
+        Some(HandshakeError::SchemaMismatch)
+    ));
+
+    let server_err = server_task
+        .await
+        .unwrap()
+        .expect_err("the server must refuse it too");
+    assert!(matches!(
+        server_err.downcast_ref::<HandshakeError>(),
+        Some(HandshakeError::SchemaMismatch)
+    ));
 }
 
 #[compio::test]
@@ -159,11 +198,12 @@ async fn wrong_hmac_is_rejected() {
 
     let server_task = compio::runtime::spawn(async move {
         let mut conn = listener.accept().await.expect("accept failed");
-        authenticate_server(&mut conn, &hmac()).await
+        authenticate_server(&mut conn, &hmac(), SCHEMA).await
     });
 
     let mut conn = Conn::connect_tcp(addr).await.expect("connect failed");
-    let client_result = authenticate_client(&mut conn, &HandshakeMode::hmac(b"wrong".to_vec())).await;
+    let client_result =
+        authenticate_client(&mut conn, &HandshakeMode::hmac(b"wrong".to_vec()), SCHEMA).await;
     let client_err = client_result.expect_err("client must be rejected");
     assert!(matches!(
         client_err.current_context(),
@@ -193,7 +233,7 @@ async fn one_to_one_rejects_second_client() {
         let gate = ConnectionGate::new(ConnectionMode::OneToOne);
         let mut first = listener.accept().await.expect("accept first failed");
         let _lease = gate.try_acquire().expect("first client must acquire the gate");
-        authenticate_server(&mut first, &hmac())
+        authenticate_server(&mut first, &hmac(), SCHEMA)
             .await
             .expect("first handshake failed");
         let first_session = spawn_session::<echo::Client, _>(
@@ -217,7 +257,7 @@ async fn one_to_one_rejects_second_client() {
     assert_eq!(ping(&first_session, "first").await, "echo first");
 
     let mut second_conn = Conn::connect_tcp(addr).await.expect("connect failed");
-    let second_result = authenticate_client(&mut second_conn, &hmac()).await;
+    let second_result = authenticate_client(&mut second_conn, &hmac(), SCHEMA).await;
     let err = second_result.expect_err("second client must be rejected");
     assert!(matches!(
         err.current_context(),
@@ -262,7 +302,7 @@ async fn oversized_message_trips_traversal_limit() {
             }
 
             let mut conn = listener.accept().await.expect("accept failed");
-            authenticate_server(&mut conn, &hmac())
+            authenticate_server(&mut conn, &hmac(), SCHEMA)
                 .await
                 .expect("server handshake failed");
             let session = spawn_session_with_options::<echo::Client, _>(
@@ -279,7 +319,7 @@ async fn oversized_message_trips_traversal_limit() {
     });
 
     let mut conn = Conn::connect_tcp(addr).await.expect("connect failed");
-    authenticate_client(&mut conn, &hmac())
+    authenticate_client(&mut conn, &hmac(), SCHEMA)
         .await
         .expect("client handshake failed");
     let client_session = spawn_session_with_options::<echo::Client, _>(

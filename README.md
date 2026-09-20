@@ -26,15 +26,18 @@ interface Echo {
 Server:
 
 ```rust
-use ogurpchik::auth::handshake::HandshakeMode;
+use ogurpchik::auth::handshake::{HandshakeMode, SchemaId};
 use ogurpchik::endpoint::Endpoint;
 use ogurpchik::rpc::accept_session;
+
+const SCHEMA: SchemaId = SchemaId(0x0123_4567_89ab_cdef);
 
 let endpoint = Endpoint::for_service("myapp", "echo")?;
 let listener = endpoint.listen().await?;
 let session = accept_session::<echo_capnp::echo::Client, _>(
     &listener,
     &HandshakeMode::hmac(b"secret".to_vec()),
+    SCHEMA,
     EchoImpl,
 ).await?;
 ```
@@ -47,6 +50,7 @@ use ogurpchik::rpc::connect_session;
 let session = connect_session::<echo_capnp::echo::Client, _>(
     &endpoint,
     &HandshakeMode::hmac(b"secret".to_vec()),
+    SCHEMA,
     EchoImpl,
 ).await?;
 
@@ -54,6 +58,11 @@ let mut req = session.remote().ping_request();
 req.get().set_msg("hello");
 let reply = req.send().promise.await?;
 ```
+
+`SchemaId` is opaque to this crate — typically a hash of your `.capnp` files
+computed in `build.rs`. Both sides must present the same one or the handshake
+fails with `HandshakeError::SchemaMismatch`, instead of connecting and then
+misreading fields laid out by a different schema revision.
 
 ## Errors
 

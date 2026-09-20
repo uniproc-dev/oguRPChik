@@ -87,6 +87,7 @@ where
 pub async fn accept_session<C, S>(
     listener: &crate::net::Listener,
     mode: &crate::auth::handshake::HandshakeMode,
+    schema: crate::auth::handshake::SchemaId,
     local_bootstrap: S,
 ) -> crate::error::Result<RpcSession<C>, RpcError>
 where
@@ -94,7 +95,7 @@ where
     S: 'static,
 {
     let mut conn = listener.accept().await.change_context(RpcError::Setup)?;
-    crate::auth::handshake::authenticate_server(&mut conn, mode)
+    crate::auth::handshake::authenticate_server(&mut conn, mode, schema)
         .await
         .change_context(RpcError::Setup)?;
     Ok(spawn_session(conn, Side::Server, local_bootstrap))
@@ -103,6 +104,7 @@ where
 pub async fn connect_session<C, S>(
     endpoint: &crate::endpoint::Endpoint,
     mode: &crate::auth::handshake::HandshakeMode,
+    schema: crate::auth::handshake::SchemaId,
     local_bootstrap: S,
 ) -> crate::error::Result<RpcSession<C>, RpcError>
 where
@@ -110,7 +112,7 @@ where
     S: 'static,
 {
     let mut conn = endpoint.connect().await.change_context(RpcError::Setup)?;
-    crate::auth::handshake::authenticate_client(&mut conn, mode)
+    crate::auth::handshake::authenticate_client(&mut conn, mode, schema)
         .await
         .change_context(RpcError::Setup)?;
     Ok(spawn_session(conn, Side::Client, local_bootstrap))
@@ -119,7 +121,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::handshake::{HandshakeMode, authenticate_client, authenticate_server};
+    use crate::auth::handshake::{HandshakeMode, SchemaId, authenticate_client, authenticate_server};
     use crate::net::Listener;
     use capnp::capability::Rc;
     use std::cell::RefCell;
@@ -188,7 +190,7 @@ mod tests {
         let mode = || HandshakeMode::hmac(b"secret".to_vec());
 
         let server_task = compio::runtime::spawn(async move {
-            authenticate_server(&mut server_conn, &mode())
+            authenticate_server(&mut server_conn, &mode(), SchemaId(7))
                 .await
                 .expect("server handshake failed");
             let session = spawn_agent(server_conn, Side::Server, "host");
@@ -198,7 +200,7 @@ mod tests {
                 .expect("server session failed");
         });
 
-        authenticate_client(&mut client_conn, &mode())
+        authenticate_client(&mut client_conn, &mode(), SchemaId(7))
             .await
             .expect("client handshake failed");
         let session = spawn_agent(client_conn, Side::Client, "agent");
