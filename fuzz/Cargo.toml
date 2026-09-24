@@ -1,0 +1,23 @@
+[package]
+name = "ogurpchik-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+ogurpchik = { path = "..", features = ["fuzzing"] }
+
+[[bin]]
+name = "inbound"
+path = "fuzz_targets/inbound.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

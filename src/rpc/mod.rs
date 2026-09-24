@@ -1,14 +1,32 @@
 
+mod frame;
+mod network;
+
 use crate::error::{RpcError, from_capnp_exception};
 use crate::net::Conn;
 use capnp::capability::{Client, FromClientHook, FromServer};
 use capnp::message::ReaderOptions;
-use capnp_rpc::{RpcSystem, twoparty};
-use compio::io::compat::AsyncStream;
+use capnp_rpc::RpcSystem;
 use compio::runtime::JoinHandle;
 use error_stack::{Report, ResultExt};
 
 pub use capnp_rpc::rpc_twoparty_capnp::Side;
+pub use network::VatNetwork;
+
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    use capnp::message::ReaderOptions;
+
+    pub fn inbound_matches_stock(stream: &[u8], steps: &[usize], capacity: usize, limit: usize) {
+        let mut options = ReaderOptions::new();
+        options.traversal_limit_in_words(Some(limit));
+        assert_eq!(
+            super::frame::check::ours(stream, steps, capacity, options),
+            super::frame::check::stock(stream, options)
+        );
+    }
+}
 
 pub fn default_reader_options() -> ReaderOptions {
     let mut options = ReaderOptions::new();
@@ -62,15 +80,7 @@ where
         hook: local_client.into_client_hook(),
     };
 
-    let reader = AsyncStream::new(conn.clone());
-    let writer = AsyncStream::new(conn);
-    let network = Box::new(twoparty::VatNetwork::new(
-        reader,
-        writer,
-        side,
-        reader_options,
-    ));
-
+    let network = Box::new(VatNetwork::new(conn, side, reader_options));
     let mut rpc_system = RpcSystem::new(network, Some(untyped));
     let remote_side = match side {
         Side::Server => Side::Client,
