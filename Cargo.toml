@@ -54,7 +54,7 @@ widestring = "1.2.1"
 winapi = { version = "0.3.9", features = ["libloaderapi", "combaseapi", "minwindef", "ntdef"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1", features = ["net"] }
+rustix = { version = "1.1", features = ["net", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "1.0.0-alpha.2"
