@@ -1,6 +1,6 @@
 use crate::error::TransportError;
 use compio::BufResult;
-use compio::buf::{IoBuf, IoBufMut};
+use compio::buf::{IoBuf, IoBufMut, IoVectoredBuf};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::net::{TcpStream, UnixStream};
 use error_stack::{Report, ResultExt};
@@ -139,6 +139,16 @@ impl AsyncWrite for Conn {
             #[cfg(windows)]
             Self::Npipe(s) => s.write(buf).await,
             Self::Vsock(s) => s.write(buf).await,
+        }
+    }
+
+    async fn write_vectored<T: IoVectoredBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        match self {
+            Self::Tcp(s) => s.write_vectored(buf).await,
+            Self::Uds(s) => s.write_vectored(buf).await,
+            #[cfg(windows)]
+            Self::Npipe(s) => s.write_vectored(buf).await,
+            Self::Vsock(s) => s.write_vectored(buf).await,
         }
     }
 

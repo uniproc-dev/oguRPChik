@@ -1,7 +1,7 @@
 use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, IoBufMut};
+use compio::buf::{IntoInner, IoBuf, IoBufMut, IoVectoredBuf};
 use compio::driver::SharedFd;
-use compio::driver::op::{Accept, Connect, Recv, Send, BufResultExt};
+use compio::driver::op::{Accept, Connect, Recv, Send, SendVectored, BufResultExt};
 use compio::io::{AsyncRead, AsyncWrite};
 use compio::runtime::{Attacher, submit};
 use socket2::{Domain, SockAddr, Socket, Type};
@@ -74,6 +74,11 @@ impl AsyncRead for VsockStream {
 impl AsyncWrite for VsockStream {
     async fn write<T: IoBuf>(&mut self, buf: T) -> BufResult<usize, T> {
         let op = Send::new(VsockHandle(self.inner.clone()), buf, 0);
+        submit(op).await.map_buffer(|op| op.into_inner())
+    }
+
+    async fn write_vectored<T: IoVectoredBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        let op = SendVectored::new(VsockHandle(self.inner.clone()), buf, 0);
         submit(op).await.map_buffer(|op| op.into_inner())
     }
     async fn flush(&mut self) -> io::Result<()> {

@@ -1,7 +1,7 @@
 use crate::net::Splitable;
 use crate::net::vsock::VsockTarget;
 use compio::BufResult;
-use compio::buf::{IoBuf, IoBufMut};
+use compio::buf::{IoBuf, IoBufMut, IoVectoredBuf};
 use compio::io::{AsyncRead, AsyncWrite};
 use socket2::SockAddr;
 use std::io;
@@ -99,6 +99,16 @@ impl AsyncWrite for VStream {
 
             #[cfg(unix)]
             Self::Vsock(s) => s.write(buf).await,
+        }
+    }
+
+    async fn write_vectored<T: IoVectoredBuf>(&mut self, buf: T) -> BufResult<usize, T> {
+        match self {
+            #[cfg(windows)]
+            Self::Hv(s) => s.write_vectored(buf).await,
+
+            #[cfg(unix)]
+            Self::Vsock(s) => s.write_vectored(buf).await,
         }
     }
 
