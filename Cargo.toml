@@ -1,6 +1,6 @@
 [package]
 name = "ogurpchik"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 authors = ["ignatternyev54@gmail.com"]
 license = "MIT"

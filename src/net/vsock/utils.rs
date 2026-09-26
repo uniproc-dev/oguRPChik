@@ -26,30 +26,47 @@ pub fn get_best_vmid() -> std::io::Result<GUID> {
         Err(e) => return Err(e),
     };
 
-    if vms.is_empty() {
-        return Err(std::io::Error::new(
+    best_vm(&vms).map(uuid_to_guid).ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "No compute systems found",
-        ));
-    }
-
-    if let Some(wsl) = vms.iter().find(|vm| vm.owner == "WSL") {
-        return Ok(uuid_to_guid(wsl.id));
-    }
-
-    Ok(uuid_to_guid(vms[0].id))
+            "No compute system with a usable VM id found",
+        )
+    })
 }
 
-#[allow(dead_code)]
+fn best_vm(vms: &[ComputeSystem]) -> Option<Uuid> {
+    vms.iter()
+        .filter(|vm| vm.owner == "WSL")
+        .chain(vms.iter())
+        .find_map(ComputeSystem::vm_id)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ComputeSystem {
-    pub id: Uuid,
-    pub system_type: String,
-    pub owner: String,
-    pub runtime_id: Uuid,
     #[serde(default)]
-    pub state: String,
+    id: String,
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    runtime_id: String,
+}
+
+impl ComputeSystem {
+    fn vm_id(&self) -> Option<Uuid> {
+        self.runtime_id
+            .parse()
+            .ok()
+            .or_else(|| self.id.parse().ok())
+    }
+}
+
+fn parse_compute_systems(json: &str) -> std::io::Result<Vec<ComputeSystem>> {
+    if json.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(json)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
 }
 
 fn enumerate_compute_systems(query: &str) -> std::io::Result<Vec<ComputeSystem>> {
@@ -106,20 +123,16 @@ fn enumerate_compute_systems(query: &str) -> std::io::Result<Vec<ComputeSystem>>
             return Err(err);
         }
 
-        serde_json::from_str(&compute_systems)
-            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))
+        parse_compute_systems(&compute_systems)
     }
 }
 
-#[allow(unused)]
 fn get_wsl_vmid_by_hcs() -> std::io::Result<Option<Uuid>> {
     let vms = enumerate_compute_systems("{}")?;
-    for vm in vms {
-        if vm.owner == "WSL" {
-            return Ok(Some(vm.id));
-        }
-    }
-    Ok(None)
+    Ok(vms
+        .iter()
+        .filter(|vm| vm.owner == "WSL")
+        .find_map(ComputeSystem::vm_id))
 }
 
 pub fn get_wsl_vmid_by_reg() -> std::io::Result<Option<Uuid>> {
@@ -148,4 +161,66 @@ pub fn get_wsl_vmid() -> std::io::Result<Option<Uuid>> {
         Err(err) => return Err(err),
     }
     get_wsl_vmid_by_reg()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WSL: &str = "c6de7088-6992-4adf-8038-5984755d5412";
+    const COWORK_RUNTIME: &str = "ed4d837e-aa16-57c4-9c8a-d1027b76533a";
+
+    fn listing(entries: &[(&str, &str, &str)]) -> String {
+        let entries: Vec<String> = entries
+            .iter()
+            .map(|(id, owner, runtime_id)| {
+                format!(
+                    r#"{{"Id":"{id}","SystemType":"VirtualMachine","Name":"{id}","Owner":"{owner}","RuntimeId":"{runtime_id}","State":"Running"}}"#
+                )
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
+    }
+
+    fn best(json: &str) -> Option<Uuid> {
+        best_vm(&parse_compute_systems(json).unwrap())
+    }
+
+    #[test]
+    fn a_compute_system_with_a_non_uuid_id_does_not_hide_wsl() {
+        let json = listing(&[
+            ("cowork-vm-45f50555", "cowork-vm-45f50555", COWORK_RUNTIME),
+            (WSL, "WSL", WSL),
+        ]);
+        assert_eq!(best(&json), Some(WSL.parse().unwrap()));
+    }
+
+    #[test]
+    fn wsl_wins_wherever_it_is_listed() {
+        let json = listing(&[
+            (WSL, "WSL", WSL),
+            ("cowork-vm-45f50555", "cowork-vm-45f50555", COWORK_RUNTIME),
+        ]);
+        assert_eq!(best(&json), Some(WSL.parse().unwrap()));
+    }
+
+    #[test]
+    fn without_wsl_the_runtime_id_addresses_the_vm() {
+        let json = listing(&[("cowork-vm-45f50555", "cowork-vm-45f50555", COWORK_RUNTIME)]);
+        assert_eq!(best(&json), Some(COWORK_RUNTIME.parse().unwrap()));
+    }
+
+    #[test]
+    fn entries_without_any_uuid_are_skipped() {
+        let json = listing(&[("not-a-vm", "someone", ""), (WSL, "WSL", WSL)]);
+        assert_eq!(best(&json), Some(WSL.parse().unwrap()));
+        assert_eq!(best(&listing(&[("not-a-vm", "someone", "")])), None);
+    }
+
+    #[test]
+    fn missing_fields_and_an_empty_listing_are_not_errors() {
+        assert_eq!(best(r#"[{"Id":"x"},{"Owner":"WSL","RuntimeId":"c6de7088-6992-4adf-8038-5984755d5412"}]"#), Some(WSL.parse().unwrap()));
+        assert_eq!(best("[]"), None);
+        assert_eq!(best(""), None);
+    }
 }
