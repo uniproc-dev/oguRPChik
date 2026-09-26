@@ -51,7 +51,7 @@ async fn main() {
         }
         "--connect" => {
             #[cfg(windows)]
-            let endpoint = Endpoint::vsock_to_best_vm(port).expect("failed to resolve best vm");
+            let endpoint = Endpoint::vsock_to_wsl(port).expect("failed to resolve the WSL VM");
             #[cfg(not(windows))]
             let endpoint = Endpoint::vsock_to_host(port);
             let session = connect_session::<echo::Client, _>(&endpoint, &handshake, SCHEMA, EchoImpl)

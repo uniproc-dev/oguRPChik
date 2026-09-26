@@ -128,11 +128,13 @@ fn enumerate_compute_systems(query: &str) -> std::io::Result<Vec<ComputeSystem>>
 }
 
 fn get_wsl_vmid_by_hcs() -> std::io::Result<Option<Uuid>> {
-    let vms = enumerate_compute_systems("{}")?;
-    Ok(vms
-        .iter()
+    Ok(wsl_vm(&enumerate_compute_systems("{}")?))
+}
+
+fn wsl_vm(vms: &[ComputeSystem]) -> Option<Uuid> {
+    vms.iter()
         .filter(|vm| vm.owner == "WSL")
-        .find_map(ComputeSystem::vm_id))
+        .find_map(ComputeSystem::vm_id)
 }
 
 pub fn get_wsl_vmid_by_reg() -> std::io::Result<Option<Uuid>> {
@@ -215,6 +217,17 @@ mod tests {
         let json = listing(&[("not-a-vm", "someone", ""), (WSL, "WSL", WSL)]);
         assert_eq!(best(&json), Some(WSL.parse().unwrap()));
         assert_eq!(best(&listing(&[("not-a-vm", "someone", "")])), None);
+    }
+
+    #[test]
+    fn the_wsl_lookup_never_settles_for_another_vm() {
+        let wsl = |json: &str| wsl_vm(&parse_compute_systems(json).unwrap());
+        let cowork = ("cowork-vm-45f50555", "cowork-vm-45f50555", COWORK_RUNTIME);
+        assert_eq!(wsl(&listing(&[cowork])), None);
+        assert_eq!(
+            wsl(&listing(&[cowork, (WSL, "WSL", WSL)])),
+            Some(WSL.parse().unwrap())
+        );
     }
 
     #[test]

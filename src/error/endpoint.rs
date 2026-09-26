@@ -7,6 +7,7 @@ pub enum EndpointError {
     InvalidVsockTarget,
     UnsupportedOnPlatform,
     NoRuntimeDirectory,
+    WslNotRunning,
 }
 
 impl fmt::Display for EndpointError {
@@ -18,6 +19,7 @@ impl fmt::Display for EndpointError {
                 f.write_str("transport not supported on this platform")
             }
             Self::NoRuntimeDirectory => f.write_str("no usable runtime directory"),
+            Self::WslNotRunning => f.write_str("no running WSL VM"),
         }
     }
 }

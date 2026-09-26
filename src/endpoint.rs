@@ -40,7 +40,20 @@ impl Endpoint {
         }
     }
 
+    /// The WSL2 VM, or [`EndpointError::WslNotRunning`] when there is none.
     #[cfg(windows)]
+    pub fn vsock_to_wsl(port: u32) -> Result<Self, EndpointError> {
+        let vm = crate::net::vsock::utils::get_wsl_vmid()
+            .change_context(EndpointError::InvalidVsockTarget)?
+            .ok_or_else(|| Report::new(EndpointError::WslNotRunning))?;
+        Ok(Self::Vsock {
+            target: VsockTarget::Guid(vm),
+            port,
+        })
+    }
+
+    #[cfg(windows)]
+    #[deprecated(note = "falls back to any VM when WSL is not running; use vsock_to_wsl")]
     pub fn vsock_to_best_vm(port: u32) -> Result<Self, EndpointError> {
         let guid = crate::net::vsock::utils::get_best_vmid()
             .change_context(EndpointError::InvalidVsockTarget)?;
