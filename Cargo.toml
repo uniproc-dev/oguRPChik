@@ -1,6 +1,6 @@
 [package]
 name = "ogurpchik"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 authors = ["ignatternyev54@gmail.com"]
 license = "MIT"
@@ -26,7 +26,7 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 base64 = "0.22.1"
 
 futures = "0.3.32"
-tracing = { version = "0.1.44", features = ["release_max_level_warn"] }
+tracing = "0.1.44"
 
 # vsock (net/vsock): VM GUID resolution via vmcompute.dll (JSON output).
 uuid = { version = "1.20.0", features = ["v4", "serde"] }
