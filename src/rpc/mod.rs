@@ -94,6 +94,11 @@ where
     }
 }
 
+/// Accepts one connection and runs the handshake inline before returning.
+///
+/// Serve each returned session on its own task and call this again right away.
+/// A loop that awaits `session.wait()` before the next accept leaves a second
+/// client connected but unanswered until its handshake times out.
 pub async fn accept_session<C, S>(
     listener: &crate::net::Listener,
     mode: &crate::auth::handshake::HandshakeMode,
