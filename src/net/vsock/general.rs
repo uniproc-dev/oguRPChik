@@ -62,10 +62,10 @@ impl VStream {
             let (vm_guid, service_id) = match target {
                 VsockTarget::Cid(cid) => {
                     let g = match cid {
-                        u32::MAX => ::windows::Win32::System::Hypervisor::HV_GUID_CHILDREN,
-                        0 | 1 => ::windows::Win32::System::Hypervisor::HV_GUID_LOOPBACK,
-                        2 => ::windows::Win32::System::Hypervisor::HV_GUID_PARENT,
-                        _ => ::windows::Win32::System::Hypervisor::HV_GUID_CHILDREN,
+                        u32::MAX => crate::net::vsock::windows::HV_GUID_CHILDREN,
+                        0 | 1 => crate::net::vsock::windows::HV_GUID_LOOPBACK,
+                        2 => crate::net::vsock::windows::HV_GUID_PARENT,
+                        _ => crate::net::vsock::windows::HV_GUID_CHILDREN,
                     };
                     (g, port.to_guid())
                 }

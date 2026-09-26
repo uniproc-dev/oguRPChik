@@ -9,14 +9,28 @@ use compio::runtime::{Attacher, submit};
 use socket2::{Domain, Protocol, SockAddr, SockAddrStorage, Socket, Type};
 use std::io;
 use std::os::windows::io::{AsRawSocket, FromRawSocket, OwnedSocket};
-use windows::Win32::Networking::WinSock::{
-    self, ADDRESS_FAMILY, AF_HYPERV, SO_UPDATE_ACCEPT_CONTEXT, SOCKADDR, SOCKET_ERROR, SOL_SOCKET,
-    SOMAXCONN, bind, listen,
-};
-use windows::Win32::System::Hypervisor::{
-    HV_GUID_CHILDREN, HV_GUID_VSOCK_TEMPLATE, HV_GUID_ZERO, HV_PROTOCOL_RAW, SOCKADDR_HV,
+use windows::Win32::{
+    ADDRESS_FAMILY, AF_HYPERV, SD_SEND, SO_UPDATE_ACCEPT_CONTEXT, SOCKADDR, SOCKET, SOCKET_ERROR,
+    SOL_SOCKET, SOMAXCONN, bind, listen, setsockopt, shutdown,
 };
 use windows::core::GUID;
+
+#[repr(C)]
+#[allow(non_snake_case)]
+pub(crate) struct SOCKADDR_HV {
+    Family: ADDRESS_FAMILY,
+    Reserved: u16,
+    VmId: GUID,
+    ServiceId: GUID,
+}
+
+pub(crate) const HV_PROTOCOL_RAW: i32 = 1;
+pub(crate) const HV_GUID_ZERO: GUID = GUID::zeroed();
+pub(crate) const HV_GUID_CHILDREN: GUID = GUID::from_u128(0x90db8b89_0d35_4f79_8ce9_49ea0ac8b7cd);
+pub(crate) const HV_GUID_LOOPBACK: GUID = GUID::from_u128(0xe0e16197_dd56_4a10_9195_5ee7a155a838);
+pub(crate) const HV_GUID_PARENT: GUID = GUID::from_u128(0xa42e7cda_d03f_480c_9cc2_a4de20abb878);
+pub(crate) const HV_GUID_VSOCK_TEMPLATE: GUID =
+    GUID::from_u128(0x00000000_facb_11e6_bd58_64006a7986d3);
 
 #[derive(Clone)]
 pub struct HvStream {
@@ -41,7 +55,7 @@ impl HvStream {
         let local_addr = create_hv_sockaddr(HV_GUID_ZERO, GUID::zeroed());
         unsafe {
             if bind(
-                WinSock::SOCKET(socket.as_raw_socket() as usize),
+                SOCKET(socket.as_raw_socket() as usize),
                 &local_addr as *const _ as *const SOCKADDR,
                 size_of::<SOCKADDR_HV>() as i32,
             ) == SOCKET_ERROR
@@ -103,9 +117,9 @@ impl AsyncWrite for HvStream {
     }
 
     async fn shutdown(&mut self) -> io::Result<()> {
-        let raw_socket = WinSock::SOCKET(self.inner.as_raw_socket() as usize);
+        let raw_socket = SOCKET(self.inner.as_raw_socket() as usize);
         unsafe {
-            if WinSock::shutdown(raw_socket, WinSock::SD_SEND) == SOCKET_ERROR {
+            if shutdown(raw_socket, SD_SEND) == SOCKET_ERROR {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -127,12 +141,13 @@ impl HvListener {
         let (accepted_owned, addr) = op.into_addr()?;
 
         unsafe {
-            let listener_handle = self.inner.as_raw_socket() as usize;
-            if WinSock::setsockopt(
-                WinSock::SOCKET(accepted_owned.as_raw_socket() as usize),
-                SOL_SOCKET as i32,
-                SO_UPDATE_ACCEPT_CONTEXT as i32,
-                Some(&listener_handle.to_ne_bytes()),
+            let listener_handle = (self.inner.as_raw_socket() as usize).to_ne_bytes();
+            if setsockopt(
+                SOCKET(accepted_owned.as_raw_socket() as usize),
+                SOL_SOCKET,
+                SO_UPDATE_ACCEPT_CONTEXT,
+                Some(listener_handle.as_ptr().cast()),
+                listener_handle.len() as i32,
             ) == SOCKET_ERROR
             {
                 return Err(io::Error::last_os_error());
@@ -144,7 +159,7 @@ impl HvListener {
 
     pub fn bind(target: VsockTarget, port: u32) -> io::Result<Self> {
         let socket = create_hv_socket()?;
-        let raw_fd = WinSock::SOCKET(socket.as_raw_socket() as usize);
+        let raw_fd = SOCKET(socket.as_raw_socket() as usize);
 
         let vm_guid = match target {
             VsockTarget::Cid(_) => HV_GUID_CHILDREN,
@@ -162,7 +177,7 @@ impl HvListener {
             {
                 return Err(io::Error::last_os_error());
             }
-            if listen(raw_fd, SOMAXCONN as i32) == SOCKET_ERROR {
+            if listen(raw_fd, SOMAXCONN) == SOCKET_ERROR {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -175,15 +190,15 @@ impl HvListener {
 
 fn create_hv_socket() -> io::Result<Socket> {
     Socket::new(
-        Domain::from(AF_HYPERV as i32),
+        Domain::from(AF_HYPERV),
         Type::STREAM,
-        Some(Protocol::from(HV_PROTOCOL_RAW as i32)),
+        Some(Protocol::from(HV_PROTOCOL_RAW)),
     )
 }
 
 fn create_hv_sockaddr(vm_guid: GUID, service_id: GUID) -> SOCKADDR_HV {
     SOCKADDR_HV {
-        Family: ADDRESS_FAMILY(AF_HYPERV),
+        Family: ADDRESS_FAMILY(AF_HYPERV as u16),
         Reserved: 0,
         VmId: vm_guid,
         ServiceId: service_id,

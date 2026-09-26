@@ -114,16 +114,17 @@ const PIPE_SDDL_TEMPLATE: &str = "D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})(A;;F
 /// SID of the account this process runs as, in SDDL string form.
 #[cfg(windows)]
 fn current_user_sid() -> io::Result<String> {
-    use windows::Win32::Foundation::{HANDLE, LocalFree};
-    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::Win32::{
+        ConvertSidToStringSidW, GetCurrentProcess, GetTokenInformation, HANDLE, LocalFree,
+        OpenProcessToken, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
 
     let mut token = HANDLE::default();
     // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no close;
     // `token` is a valid out-pointer.
     unsafe {
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY as u32, &mut token)
+            .ok()
             .map_err(|e| io::Error::other(format!("failed to open the process token: {e}")))?;
     }
     let _token_guard = HandleGuard(token);
@@ -150,6 +151,7 @@ fn current_user_sid() -> io::Result<String> {
             len,
             &mut len,
         )
+        .ok()
         .map_err(|e| io::Error::other(format!("failed to read the token user: {e}")))?;
     }
 
@@ -162,6 +164,7 @@ fn current_user_sid() -> io::Result<String> {
     // string with LocalAlloc, freed below.
     unsafe {
         ConvertSidToStringSidW(sid, &mut raw)
+            .ok()
             .map_err(|e| io::Error::other(format!("failed to stringify the user SID: {e}")))?;
     }
     // SAFETY: `raw` is a NUL-terminated wide string owned by us until LocalFree.
@@ -169,13 +172,13 @@ fn current_user_sid() -> io::Result<String> {
         .map_err(|e| io::Error::other(format!("user SID is not valid UTF-16: {e}")))?;
     // SAFETY: `raw` came from ConvertSidToStringSidW and is unused afterwards.
     unsafe {
-        let _ = LocalFree(Some(windows::Win32::Foundation::HLOCAL(raw.0.cast())));
+        let _ = LocalFree(HANDLE(raw.0.cast()));
     }
     Ok(text)
 }
 
 #[cfg(windows)]
-struct HandleGuard(windows::Win32::Foundation::HANDLE);
+struct HandleGuard(windows::Win32::HANDLE);
 
 #[cfg(windows)]
 impl Drop for HandleGuard {
@@ -183,7 +186,7 @@ impl Drop for HandleGuard {
         // SAFETY: the handle came from OpenProcessToken and is not used after
         // this point.
         unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+            let _ = windows::Win32::CloseHandle(self.0);
         }
     }
 }
@@ -196,14 +199,11 @@ impl Drop for HandleGuard {
 #[cfg(windows)]
 fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
     use compio::driver::AsRawFd;
-    use windows::Win32::Foundation::{HANDLE, LocalFree};
-    use windows::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    use windows::Win32::{
+        ACL, ConvertStringSecurityDescriptorToSecurityDescriptorW, DACL_SECURITY_INFORMATION,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, HANDLE, LABEL_SECURITY_INFORMATION,
+        LocalFree, PSECURITY_DESCRIPTOR, SDDL_REVISION_1, SE_KERNEL_OBJECT, SECURITY_INFORMATION,
         SetSecurityInfo,
-    };
-    use windows::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
-        LABEL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     };
     use windows::core::HSTRING;
 
@@ -216,10 +216,11 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             &sddl,
-            SDDL_REVISION_1,
+            SDDL_REVISION_1 as u32,
             &mut descriptor,
             None,
         )
+        .ok()
         .map_err(|e| io::Error::other(format!("failed to parse the pipe SDDL: {e}")))?;
     }
 
@@ -231,6 +232,7 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
         // out-pointers are valid for the duration of the call.
         unsafe {
             GetSecurityDescriptorDacl(descriptor, &mut dacl_present, &mut dacl, &mut defaulted)
+                .ok()
                 .map_err(|e| io::Error::other(format!("failed to read the pipe DACL: {e}")))?;
         }
 
@@ -239,6 +241,7 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
         // SAFETY: as above. The SACL here carries only the mandatory label.
         unsafe {
             GetSecurityDescriptorSacl(descriptor, &mut sacl_present, &mut sacl, &mut defaulted)
+                .ok()
                 .map_err(|e| io::Error::other(format!("failed to read the pipe label: {e}")))?;
         }
 
@@ -253,17 +256,17 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
             SetSecurityInfo(
                 handle,
                 SE_KERNEL_OBJECT,
-                DACL_SECURITY_INFORMATION,
+                SECURITY_INFORMATION(DACL_SECURITY_INFORMATION as u32),
                 None,
                 None,
-                Some(dacl),
+                Some(dacl.cast_const()),
                 None,
             )
         };
-        if status.is_err() {
+        if status != 0 {
             return Err(io::Error::other(format!(
                 "failed to set the pipe DACL: {}",
-                io::Error::from_raw_os_error(status.0 as i32)
+                io::Error::from_raw_os_error(status as i32)
             )));
         }
 
@@ -272,17 +275,17 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
             SetSecurityInfo(
                 handle,
                 SE_KERNEL_OBJECT,
-                LABEL_SECURITY_INFORMATION,
+                SECURITY_INFORMATION(LABEL_SECURITY_INFORMATION as u32),
                 None,
                 None,
                 None,
-                Some(sacl),
+                Some(sacl.cast_const()),
             )
         };
-        if status.is_err() {
+        if status != 0 {
             return Err(io::Error::other(format!(
                 "failed to set the pipe integrity label: {}",
-                io::Error::from_raw_os_error(status.0 as i32)
+                io::Error::from_raw_os_error(status as i32)
             )));
         }
         Ok(())
@@ -291,10 +294,7 @@ fn apply_pipe_security(server: &NamedPipeServer) -> io::Result<()> {
     // SAFETY: `descriptor` was allocated by the conversion call above and is
     // not referenced past this point.
     unsafe {
-        let _ = LocalFree(Some(std::mem::transmute::<
-            PSECURITY_DESCRIPTOR,
-            windows::Win32::Foundation::HLOCAL,
-        >(descriptor)));
+        let _ = LocalFree(HANDLE(descriptor.0));
     }
 
     result

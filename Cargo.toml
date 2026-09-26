@@ -1,6 +1,6 @@
 [package]
 name = "ogurpchik"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 authors = ["ignatternyev54@gmail.com"]
 license = "MIT"
@@ -42,14 +42,10 @@ proptest = "1.11"
 compio = { version = "0.18.0", features = ["io-compat"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = [
-    "Win32_Foundation",
-    "Win32_Networking_WinSock",
-    "Win32_System_Threading",
-    "Win32_System_Hypervisor",
-    "Win32_System_Pipes",
-    "Win32_Security",
-    "Win32_Security_Authorization"] }
+windows = { git = "https://github.com/microsoft/windows-rs", rev = "c14074c45", features = [
+    "minwindef", "winnt", "winbase", "handleapi", "processthreadsapi",
+    "securitybaseapi", "sddl", "aclapi", "accctrl",
+    "winsock2", "ws2", "mswsock"] }
 
 # net/vsock/utils.rs loads vmcompute.dll dynamically and falls back to a
 # registry lookup for the WSL VM id — pre-`windows`-crate idioms kept from

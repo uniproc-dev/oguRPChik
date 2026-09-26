@@ -96,14 +96,14 @@ impl Conn {
 #[cfg(windows)]
 fn npipe_client_pid(server: &compio::fs::named_pipe::NamedPipeServer) -> PeerIdentity {
     use compio::driver::AsRawFd;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Pipes::GetNamedPipeClientProcessId;
+    use windows::Win32::{GetNamedPipeClientProcessId, HANDLE};
 
     let mut pid = 0u32;
     // SAFETY: the handle is borrowed from the live pipe server; `pid` is a valid out-pointer.
-    match unsafe { GetNamedPipeClientProcessId(HANDLE(server.as_raw_fd() as _), &mut pid) } {
-        Ok(()) => PeerIdentity::Pid { pid },
-        Err(_) => PeerIdentity::Unknown,
+    if unsafe { GetNamedPipeClientProcessId(HANDLE(server.as_raw_fd() as _), &mut pid) }.as_bool() {
+        PeerIdentity::Pid { pid }
+    } else {
+        PeerIdentity::Unknown
     }
 }
 
